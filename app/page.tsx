@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type StatKey = "money" | "employees" | "reputation" | "morale";
 
@@ -21,6 +21,19 @@ type Scenario = {
   description: string;
   choices: [Choice, Choice, Choice];
 };
+
+type LeaderboardEntry = {
+  name: string;
+  score: number;
+  resultType: string;
+  money: number;
+  employees: number;
+  reputation: number;
+  morale: number;
+  createdAt: string;
+};
+
+const LEADERBOARD_STORAGE_KEY = "ceo-simulator-leaderboard";
 
 const START_STATS: Record<StatKey, number> = {
   money: 1_000_000,
@@ -362,6 +375,96 @@ function formatMoney(value: number) {
   }).format(value);
 }
 
+function calculateScore(stats: Record<StatKey, number>) {
+  return Math.floor(
+    stats.money / 10000 +
+      stats.reputation * 10 +
+      stats.morale * 5 +
+      stats.employees * 2,
+  );
+}
+
+function sanitizeLeaderboard(entries: LeaderboardEntry[]) {
+  return entries
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.name === "string" &&
+        typeof entry.score === "number" &&
+        typeof entry.resultType === "string" &&
+        typeof entry.money === "number" &&
+        typeof entry.employees === "number" &&
+        typeof entry.reputation === "number" &&
+        typeof entry.morale === "number" &&
+        typeof entry.createdAt === "string",
+    )
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      return (
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+    })
+    .slice(0, 20);
+}
+
+function readLeaderboard() {
+  if (typeof window === "undefined") {
+    return [] as LeaderboardEntry[];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LEADERBOARD_STORAGE_KEY);
+    if (!raw) {
+      return [] as LeaderboardEntry[];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [] as LeaderboardEntry[];
+    }
+
+    return sanitizeLeaderboard(parsed as LeaderboardEntry[]);
+  } catch {
+    return [] as LeaderboardEntry[];
+  }
+}
+
+function writeLeaderboard(entries: LeaderboardEntry[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(
+    LEADERBOARD_STORAGE_KEY,
+    JSON.stringify(sanitizeLeaderboard(entries)),
+  );
+}
+
+function upsertLeaderboardEntry(
+  entries: LeaderboardEntry[],
+  newEntry: LeaderboardEntry,
+) {
+  const normalizedName = newEntry.name.trim().toLocaleLowerCase("cs-CZ");
+  const existingEntry = entries.find(
+    (entry) => entry.name.trim().toLocaleLowerCase("cs-CZ") === normalizedName,
+  );
+
+  let nextEntries = entries.filter(
+    (entry) => entry.name.trim().toLocaleLowerCase("cs-CZ") !== normalizedName,
+  );
+
+  if (!existingEntry || newEntry.score >= existingEntry.score) {
+    nextEntries = [...nextEntries, newEntry];
+  } else {
+    nextEntries = [...nextEntries, existingEntry];
+  }
+
+  return sanitizeLeaderboard(nextEntries);
+}
+
 function getResultName(stats: Record<StatKey, number>) {
   if (stats.money >= 2_500_000 && stats.employees >= 8) {
     return {
@@ -396,6 +499,10 @@ export default function Home() {
   const [stats, setStats] = useState(START_STATS);
   const [finished, setFinished] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [leaderboardName, setLeaderboardName] = useState("");
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [leaderboardError, setLeaderboardError] = useState("");
+  const [leaderboardSaved, setLeaderboardSaved] = useState(false);
 
   const progress = useMemo(() => {
     if (!started) {
@@ -407,6 +514,11 @@ export default function Home() {
 
   const currentScenario = scenarios[currentIndex];
   const result = useMemo(() => getResultName(stats), [stats]);
+  const score = useMemo(() => calculateScore(stats), [stats]);
+
+  useEffect(() => {
+    setLeaderboard(readLeaderboard());
+  }, []);
 
   const startGame = () => {
     setStarted(true);
@@ -414,6 +526,9 @@ export default function Home() {
     setStats(START_STATS);
     setFinished(false);
     setFailed(false);
+    setLeaderboardName("");
+    setLeaderboardError("");
+    setLeaderboardSaved(false);
   };
 
   const resetGame = () => {
@@ -422,6 +537,9 @@ export default function Home() {
     setStats(START_STATS);
     setFinished(false);
     setFailed(false);
+    setLeaderboardName("");
+    setLeaderboardError("");
+    setLeaderboardSaved(false);
   };
 
   const handleChoice = (choice: Choice) => {
@@ -447,6 +565,55 @@ export default function Home() {
 
     setCurrentIndex((prev) => prev + 1);
   };
+
+  const handleSaveLeaderboard = () => {
+    const trimmedName = leaderboardName.trim();
+
+    if (!trimmedName) {
+      setLeaderboardError("Vyplň prosím svoje jméno.");
+      return;
+    }
+
+    const newEntry: LeaderboardEntry = {
+      name: trimmedName,
+      score,
+      resultType: result.name,
+      money: stats.money,
+      employees: stats.employees,
+      reputation: stats.reputation,
+      morale: stats.morale,
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedLeaderboard = upsertLeaderboardEntry(
+      readLeaderboard(),
+      newEntry,
+    );
+
+    writeLeaderboard(updatedLeaderboard);
+    setLeaderboard(updatedLeaderboard);
+    setLeaderboardError("");
+    setLeaderboardSaved(true);
+    setLeaderboardName(trimmedName);
+  };
+
+  const handleClearLeaderboard = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const confirmed = window.confirm("Opravdu smazat všechny výsledky?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    window.localStorage.removeItem(LEADERBOARD_STORAGE_KEY);
+    setLeaderboard([]);
+    setLeaderboardSaved(false);
+  };
+
+  const showLeaderboard = leaderboardSaved || leaderboard.length > 0;
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_#111827,_#020617_55%)] text-slate-100 antialiased">
@@ -479,8 +646,8 @@ export default function Home() {
                 Vybuduj firmu od nuly
               </h2>
               <p className="mt-4 max-w-lg text-base text-slate-200 sm:text-lg">
-                Dokážeš během pár minut projít 16 klíčových rozhodnutí a
-                vybudovat stabilní firmu?
+                Dokážeš během pár minut projít {scenarios.length} klíčových
+                rozhodnutí a vybudovat stabilní firmu?
               </p>
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-200">
                 <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2">
@@ -490,7 +657,7 @@ export default function Home() {
                   Moderní dark design
                 </span>
                 <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2">
-                  16 obchodních scénářů
+                  {scenarios.length} obchodních scénářů
                 </span>
               </div>
               <button
@@ -513,8 +680,8 @@ export default function Home() {
                   Když peníze nebo reputace klesnou na nulu, firma zkrachuje.
                 </li>
                 <li className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                  Na konci dostaneš jeden ze 4 výsledků podle toho, jak jsi firmu
-                  vedl.
+                  Na konci dostaneš jeden ze 4 výsledků podle toho, jak jsi
+                  firmu vedl.
                 </li>
               </ul>
               <div className="mt-6 rounded-3xl border border-emerald-400/20 bg-emerald-400/10 p-4 text-sm text-emerald-100">
@@ -670,7 +837,93 @@ export default function Home() {
                   {stats.employees}, reputace: {stats.reputation}, morálka:{" "}
                   {stats.morale}.
                 </p>
+                <p className="mt-2 text-cyan-100/90">
+                  Skóre: <span className="font-bold text-white">{score}</span>
+                </p>
               </div>
+
+              <section className="mt-6 rounded-[28px] border border-amber-400/20 bg-amber-400/10 p-5 shadow-xl shadow-black/30 backdrop-blur-xl">
+                <h4 className="text-xl font-black text-white">
+                  🏆 Soutěž o nejlepšího CEO dne
+                </h4>
+
+                <div className="mt-4">
+                  <label
+                    htmlFor="leaderboard-name"
+                    className="mb-2 block text-sm font-semibold text-slate-100"
+                  >
+                    Tvoje jméno
+                  </label>
+                  <input
+                    id="leaderboard-name"
+                    type="text"
+                    value={leaderboardName}
+                    onChange={(event) => {
+                      setLeaderboardName(event.target.value);
+                      if (leaderboardError) {
+                        setLeaderboardError("");
+                      }
+                    }}
+                    placeholder="Např. Kuba"
+                    className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none transition placeholder:text-slate-400 focus:border-cyan-400/50 focus:bg-black/30"
+                  />
+                  {leaderboardError && (
+                    <p className="mt-2 text-sm text-rose-300">
+                      {leaderboardError}
+                    </p>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSaveLeaderboard}
+                  className="mt-4 inline-flex items-center justify-center rounded-full bg-cyan-400 px-5 py-3 text-sm font-black text-slate-950 shadow-xl shadow-cyan-400/20 transition hover:scale-[1.02] hover:bg-cyan-300"
+                >
+                  Uložit výsledek
+                </button>
+              </section>
+
+              {showLeaderboard && (
+                <section className="mt-6 rounded-[28px] border border-white/10 bg-black/20 p-5 shadow-xl shadow-black/30 backdrop-blur-xl">
+                  <h4 className="text-xl font-black text-white">
+                    🏆 TOP 10 CEO DNE
+                  </h4>
+
+                  <div className="mt-4 space-y-3">
+                    {leaderboard.slice(0, 10).map((entry, index) => (
+                      <div
+                        key={`${entry.name}-${entry.createdAt}`}
+                        className={`flex items-center justify-between gap-4 rounded-2xl border p-4 text-sm ${
+                          index === 0
+                            ? "border-amber-300/40 bg-amber-300/15 text-amber-50"
+                            : "border-white/10 bg-white/5 text-slate-100"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold">
+                            {index + 1}. {entry.name}
+                          </p>
+                          <p
+                            className={`mt-1 truncate text-xs ${
+                              index === 0 ? "text-amber-100" : "text-slate-300"
+                            }`}
+                          >
+                            {entry.score} — {entry.resultType}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleClearLeaderboard}
+                    className="mt-4 inline-flex items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 px-4 py-2 text-xs font-semibold text-rose-100 transition hover:bg-rose-400/20"
+                  >
+                    Smazat leaderboard
+                  </button>
+                </section>
+              )}
 
               <section className="mt-6 rounded-[28px] border border-white/10 bg-black/20 p-5 shadow-xl shadow-black/30 backdrop-blur-xl">
                 <h4 className="text-xl font-black text-white">
@@ -753,4 +1006,5 @@ export default function Home() {
         )}
       </section>
     </main>
-  );}  
+  );
+}
