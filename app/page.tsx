@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { supabase } from "@/lib/supabase";
+
 type StatKey = "money" | "employees" | "reputation" | "morale";
 
 type Impact = {
@@ -33,7 +35,17 @@ type LeaderboardEntry = {
   createdAt: string;
 };
 
-const LEADERBOARD_STORAGE_KEY = "ceo-simulator-leaderboard";
+type LeaderboardRow = {
+  id: number;
+  name: string | null;
+  score: number | null;
+  result_type: string | null;
+  money: number | null;
+  employees: number | null;
+  reputation: number | null;
+  morale: number | null;
+  created_at: string | null;
+};
 
 const START_STATS: Record<StatKey, number> = {
   money: 1_000_000,
@@ -384,85 +396,17 @@ function calculateScore(stats: Record<StatKey, number>) {
   );
 }
 
-function sanitizeLeaderboard(entries: LeaderboardEntry[]) {
-  return entries
-    .filter(
-      (entry) =>
-        entry &&
-        typeof entry.name === "string" &&
-        typeof entry.score === "number" &&
-        typeof entry.resultType === "string" &&
-        typeof entry.money === "number" &&
-        typeof entry.employees === "number" &&
-        typeof entry.reputation === "number" &&
-        typeof entry.morale === "number" &&
-        typeof entry.createdAt === "string",
-    )
-    .sort((a, b) => {
-      if (b.score !== a.score) {
-        return b.score - a.score;
-      }
-
-      return (
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      );
-    })
-    .slice(0, 20);
-}
-
-function readLeaderboard() {
-  if (typeof window === "undefined") {
-    return [] as LeaderboardEntry[];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(LEADERBOARD_STORAGE_KEY);
-    if (!raw) {
-      return [] as LeaderboardEntry[];
-    }
-
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [] as LeaderboardEntry[];
-    }
-
-    return sanitizeLeaderboard(parsed as LeaderboardEntry[]);
-  } catch {
-    return [] as LeaderboardEntry[];
-  }
-}
-
-function writeLeaderboard(entries: LeaderboardEntry[]) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(
-    LEADERBOARD_STORAGE_KEY,
-    JSON.stringify(sanitizeLeaderboard(entries)),
-  );
-}
-
-function upsertLeaderboardEntry(
-  entries: LeaderboardEntry[],
-  newEntry: LeaderboardEntry,
-) {
-  const normalizedName = newEntry.name.trim().toLocaleLowerCase("cs-CZ");
-  const existingEntry = entries.find(
-    (entry) => entry.name.trim().toLocaleLowerCase("cs-CZ") === normalizedName,
-  );
-
-  let nextEntries = entries.filter(
-    (entry) => entry.name.trim().toLocaleLowerCase("cs-CZ") !== normalizedName,
-  );
-
-  if (!existingEntry || newEntry.score >= existingEntry.score) {
-    nextEntries = [...nextEntries, newEntry];
-  } else {
-    nextEntries = [...nextEntries, existingEntry];
-  }
-
-  return sanitizeLeaderboard(nextEntries);
+function mapLeaderboardRows(rows: LeaderboardRow[] | null): LeaderboardEntry[] {
+  return (rows ?? []).map((row) => ({
+    name: row.name ?? "Anonym",
+    score: row.score ?? 0,
+    resultType: row.result_type ?? "",
+    money: row.money ?? 0,
+    employees: row.employees ?? 0,
+    reputation: row.reputation ?? 0,
+    morale: row.morale ?? 0,
+    createdAt: row.created_at ?? new Date().toISOString(),
+  }));
 }
 
 function getResultName(stats: Record<StatKey, number>) {
@@ -516,8 +460,24 @@ export default function Home() {
   const result = useMemo(() => getResultName(stats), [stats]);
   const score = useMemo(() => calculateScore(stats), [stats]);
 
+  const loadLeaderboard = async () => {
+    const { data, error } = await supabase
+      .from("leaderboard")
+      .select("*")
+      .order("score", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    if (error) {
+      setLeaderboardError("Nepodařilo se načíst leaderboard.");
+      return;
+    }
+
+    setLeaderboard(mapLeaderboardRows(data as LeaderboardRow[]));
+  };
+
   useEffect(() => {
-    setLeaderboard(readLeaderboard());
+    void loadLeaderboard();
   }, []);
 
   const startGame = () => {
@@ -566,51 +526,43 @@ export default function Home() {
     setCurrentIndex((prev) => prev + 1);
   };
 
-  const handleSaveLeaderboard = () => {
+  const handleSaveLeaderboard = async () => {
+    alert("VERCEL TEST");
+    console.log("SUPABASE URL:", process.env.NEXT_PUBLIC_SUPABASE_URL);
+console.log("SUPABASE KEY:", process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.substring(0, 20));
     const trimmedName = leaderboardName.trim();
+if (!trimmedName) {
+  setLeaderboardError("Vyplň prosím svoje jméno.");
+  return;
+}
 
-    if (!trimmedName) {
-      setLeaderboardError("Vyplň prosím svoje jméno.");
-      return;
-    }
+console.log("Ukladam do Supabase");
 
-    const newEntry: LeaderboardEntry = {
-      name: trimmedName,
-      score,
-      resultType: result.name,
-      money: stats.money,
-      employees: stats.employees,
-      reputation: stats.reputation,
-      morale: stats.morale,
-      createdAt: new Date().toISOString(),
-    };
+const { data, error } = await supabase
+  .from("leaderboard")
+  .insert({
+    name: trimmedName,
+    score,
+    result_type: result.name,
+    money: stats.money,
+    employees: stats.employees,
+    reputation: stats.reputation,
+    morale: stats.morale,
+  })
+  .select();
 
-    const updatedLeaderboard = upsertLeaderboardEntry(
-      readLeaderboard(),
-      newEntry,
-    );
+console.log("INSERT DATA:", data);
+console.log("INSERT ERROR:", error);
 
-    writeLeaderboard(updatedLeaderboard);
-    setLeaderboard(updatedLeaderboard);
+if (error) {
+  setLeaderboardError("Nepodařilo se uložit výsledek.");
+  return;
+}
+
     setLeaderboardError("");
     setLeaderboardSaved(true);
     setLeaderboardName(trimmedName);
-  };
-
-  const handleClearLeaderboard = () => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const confirmed = window.confirm("Opravdu smazat všechny výsledky?");
-
-    if (!confirmed) {
-      return;
-    }
-
-    window.localStorage.removeItem(LEADERBOARD_STORAGE_KEY);
-    setLeaderboard([]);
-    setLeaderboardSaved(false);
+    await loadLeaderboard();
   };
 
   const showLeaderboard = leaderboardSaved || leaderboard.length > 0;
@@ -890,9 +842,9 @@ export default function Home() {
                   </h4>
 
                   <div className="mt-4 space-y-3">
-                    {leaderboard.slice(0, 10).map((entry, index) => (
+                    {leaderboard.map((entry, index) => (
                       <div
-                        key={`${entry.name}-${entry.createdAt}`}
+                        key={`${entry.name}-${entry.createdAt}-${index}`}
                         className={`flex items-center justify-between gap-4 rounded-2xl border p-4 text-sm ${
                           index === 0
                             ? "border-amber-300/40 bg-amber-300/15 text-amber-50"
@@ -914,14 +866,6 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={handleClearLeaderboard}
-                    className="mt-4 inline-flex items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 px-4 py-2 text-xs font-semibold text-rose-100 transition hover:bg-rose-400/20"
-                  >
-                    Smazat leaderboard
-                  </button>
                 </section>
               )}
 
